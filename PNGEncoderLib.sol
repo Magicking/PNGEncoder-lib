@@ -7,25 +7,162 @@ import "./PNGEncoder.sol";
 error XoutOfBounds();
 error YoutOfBounds();
 
-contract PNGImage {
-    struct InfoHeader {
-        uint32 width;
-        uint32 height;
-        uint32 imageSize;
-    }
+error InvalidDimensions();
+error UnsupportedColorType();
 
+contract PNGImage {
     struct Image {
-        InfoHeader infoHeader;
+        InfoHeader ImageInfo;
+        bytes palette;
         bytes data;
     }
 
+    // PNG signature bytes
+    bytes8 constant PNG_SIGNATURE = 0x89504E470D0A1A0A;
+    // Chunk type constants
+    bytes4 constant IHDR = 0x49484452; // "IHDR" in ASCII
+    bytes4 constant IDAT = 0x49444154; // "IDAT" in ASCII  
+    bytes4 constant IEND = 0x49454E44; // "IEND" in ASCII
+
+    struct ImageInfo {
+        uint32 width;
+        uint32 height;
+        uint8 bitDepth;
+        uint8 colorType;
+        uint8 compression;
+        uint8 filter;
+        uint8 interlace;
+    }
+
+    // Create IHDR chunk
+    function createIHDR(ImageInfo memory info) internal pure returns (bytes memory) {
+        bytes memory chunk = new bytes(13);
+        
+        // Width
+        chunk[0] = bytes1(uint8(info.width >> 24));
+        chunk[1] = bytes1(uint8(info.width >> 16));
+        chunk[2] = bytes1(uint8(info.width >> 8));
+        chunk[3] = bytes1(uint8(info.width));
+        
+        // Height
+        chunk[4] = bytes1(uint8(info.height >> 24));
+        chunk[5] = bytes1(uint8(info.height >> 16));
+        chunk[6] = bytes1(uint8(info.height >> 8));
+        chunk[7] = bytes1(uint8(info.height));
+        
+        // Other fields
+        chunk[8] = bytes1(info.bitDepth);
+        chunk[9] = bytes1(info.colorType);
+        chunk[10] = bytes1(info.compression);
+        chunk[11] = bytes1(info.filter);
+        chunk[12] = bytes1(info.interlace);
+        
+        return assembleChunk(IHDR, chunk);
+    }
+
+    // Create chunk with type and data
+    function assembleChunk(bytes4 chunkType, bytes memory data) internal pure returns (bytes memory) {
+        uint32 length = uint32(data.length);
+        bytes memory chunk = new bytes(length + 12); // length(4) + type(4) + data + crc(4)
+        
+        // Length
+        chunk[0] = bytes1(uint8(length >> 24));
+        chunk[1] = bytes1(uint8(length >> 16));
+        chunk[2] = bytes1(uint8(length >> 8));
+        chunk[3] = bytes1(uint8(length));
+        
+        // Type
+        chunk[4] = bytes1(uint8(chunkType >> 24));
+        chunk[5] = bytes1(uint8(chunkType >> 16));
+        chunk[6] = bytes1(uint8(chunkType >> 8));
+        chunk[7] = bytes1(uint8(chunkType));
+        
+        // Data
+        for (uint i = 0; i < data.length; i++) {
+            chunk[i + 8] = data[i];
+        }
+        
+        // CRC (simplified - should implement proper CRC32)
+        uint32 crc = calculateCRC(chunk[4:8], data);
+        chunk[length + 8] = bytes1(uint8(crc >> 24));
+        chunk[length + 9] = bytes1(uint8(crc >> 16));
+        chunk[length + 10] = bytes1(uint8(crc >> 8));
+        chunk[length + 11] = bytes1(uint8(crc));
+        
+        return chunk;
+    }
+
+    // Simplified CRC calculation (should implement full CRC32)
+    function calculateCRC(bytes memory type, bytes memory data) internal pure returns (uint32) {
+        bytes memory combined = bytes.concat(type, data);
+        uint32 crc = 0;
+        for (uint i = 0; i < combined.length; i++) {
+            crc = crc + uint8(combined[i]);
+        }
+        return crc;
+    }
+
+    // Create IEND chunk
+    function createIEND() internal pure returns (bytes memory) {
+        return assembleChunk(IEND, "");
+    }
+
+    // Main encode function
+    function encodePNG(Image memory img) public pure returns (string memory) {
+        // Assemble PNG
+        bytes memory png = new bytes(0);
+        png = bytes.concat(png, abi.encodePacked(PNG_SIGNATURE));
+        png = bytes.concat(png, createIHDR(info));
+        png = bytes.concat(png, createPLTE(info));
+        png = bytes.concat(png, assembleChunk(IDAT, pixels)); // Should compress pixels
+        png = bytes.concat(png, createIEND());
+
+        // Convert to Base64
+        return string(Base64.encode(png));
+    }
+
     function newImage(uint32 width, uint32 height) public pure returns (Image memory) {
-        Image memory image;
-        image.infoHeader.width = width;
-        image.infoHeader.height = height;
-        image.infoHeader.imageSize = width * height * 4;
-        image.data = new bytes(width * height * 4);
+        if (width == 0 || height == 0) revert InvalidDimensions();
+
+        Image memory image = Image({
+            ImageInfo: ImageInfo({
+            width: width,
+            height: height,
+            bitDepth: 4,  // 16 bits
+            colorType: 3, // Palette
+            compression: 0,
+            filter: 0,
+            interlace: 0
+            }),
+            palette: new bytes(0),
+            data: new bytes(0)
+        });
+        
+        // We used a palette, so we need to store 1 bytes per pixel
+        image.data = new bytes(width * height);
         return image;
+    }
+
+    function findColorInPalette(bytes memory palette, uint8 r, uint8 g, uint8 b) internal pure returns (int) {
+        // For BitDepth == 4
+        for (uint i = 0; i < palette.length; i += 3) {
+            if (palette[i] == r && palette[i + 1] == g && palette[i + 2] == b) {
+                return i / 3;
+            }
+        }
+        return -1;
+    }
+
+    function findColorInPaletteOrAdd(Image memory image, uint8 r, uint8 g, uint8 b) internal pure returns (uint8) {
+        int colorIdx = findColorInPalette(image.palette, r, g, b);
+        uint8 color;    
+        if (colorIdx == -1) {
+            image.palette = bytes.concat(image.palette, abi.encodePacked(r, g, b));
+            color = uint8(image.palette.length / 3 - 1);
+        } else {
+            color = uint8(colorIdx);
+        }
+        return color;
     }
 
     function setPixelAt(Image memory image, uint32 x, uint32 y, uint8 r, uint8 g, uint8 b, uint8 a)
@@ -39,29 +176,18 @@ contract PNGImage {
         if (!(y < height)) revert YoutOfBounds();
         uint32 index = x * 4 + ((height - y - 1) * width * 4);
         bytes memory mem = image.data;
+        uint8 colorIdx  = findColorInPaletteOrAdd(image, r, g, b);
         assembly {
             index := add(add(mem, 0x20), index)
-            mstore8(index, r)
-            index := add(index, 1)
-            mstore8(index, g)
-            index := add(index, 1)
-            mstore8(index, b)
-            index := add(index, 1)
-            mstore8(index, a)
+            mstore8(index, colorIdx)
         }
         return image;
-    }
-
-    function encode(Image memory img) public pure returns (bytes memory) {
-        return PNGEncoder.encodePNG(
-            img.infoHeader.width,
-            img.infoHeader.height,
-            img.data
-        );
     }
 
     function B64MimeEncode(string memory mime, bytes memory data) public pure returns (string memory) {
         return string(abi.encodePacked("data:", mime, ";base64,", Base64.encode(data)));
     }
+
+    
 
 }
