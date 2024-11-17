@@ -2,27 +2,26 @@
 pragma solidity 0.8.21;
 
 import "@openzeppelin/contracts/utils/Base64.sol";
-import "./PNGEncoder.sol";
 
 error XoutOfBounds();
 error YoutOfBounds();
 
 error InvalidDimensions();
-error UnsupportedColorType();
 
 contract PNGImage {
-    struct Image {
-        InfoHeader ImageInfo;
-        bytes palette;
-        bytes data;
-    }
-
     // PNG signature bytes
     bytes8 constant PNG_SIGNATURE = 0x89504E470D0A1A0A;
     // Chunk type constants
     bytes4 constant IHDR = 0x49484452; // "IHDR" in ASCII
     bytes4 constant IDAT = 0x49444154; // "IDAT" in ASCII  
     bytes4 constant IEND = 0x49454E44; // "IEND" in ASCII
+    bytes4 constant PLTE = 0x504C5445; // "PLTE" in ASCII
+
+    struct Image {
+        ImageInfo info;
+        bytes palette;
+        bytes data;
+    }
 
     struct ImageInfo {
         uint32 width;
@@ -72,10 +71,10 @@ contract PNGImage {
         chunk[3] = bytes1(uint8(length));
         
         // Type
-        chunk[4] = bytes1(uint8(chunkType >> 24));
-        chunk[5] = bytes1(uint8(chunkType >> 16));
-        chunk[6] = bytes1(uint8(chunkType >> 8));
-        chunk[7] = bytes1(uint8(chunkType));
+        chunk[4] = chunkType[0];
+        chunk[5] = chunkType[1];
+        chunk[6] = chunkType[2];
+        chunk[7] = chunkType[3];
         
         // Data
         for (uint i = 0; i < data.length; i++) {
@@ -93,8 +92,8 @@ contract PNGImage {
     }
 
     // Simplified CRC calculation (should implement full CRC32)
-    function calculateCRC(bytes memory type, bytes memory data) internal pure returns (uint32) {
-        bytes memory combined = bytes.concat(type, data);
+    function calculateCRC(bytes memory _type, bytes memory data) internal pure returns (uint32) {
+        bytes memory combined = bytes.concat(_type, data);
         uint32 crc = 0;
         for (uint i = 0; i < combined.length; i++) {
             crc = crc + uint8(combined[i]);
@@ -107,14 +106,19 @@ contract PNGImage {
         return assembleChunk(IEND, "");
     }
 
+    // Create PLTE chunk
+    function createPLTE(bytes memory palette) internal pure returns (bytes memory) {
+        return assembleChunk(PLTE, palette);
+    }
+
     // Main encode function
     function encodePNG(Image memory img) public pure returns (string memory) {
         // Assemble PNG
         bytes memory png = new bytes(0);
         png = bytes.concat(png, abi.encodePacked(PNG_SIGNATURE));
-        png = bytes.concat(png, createIHDR(info));
-        png = bytes.concat(png, createPLTE(info));
-        png = bytes.concat(png, assembleChunk(IDAT, pixels)); // Should compress pixels
+        png = bytes.concat(png, createIHDR(img.info));
+        png = bytes.concat(png, createPLTE(img.palette));
+        png = bytes.concat(png, assembleChunk(IDAT, img.data)); // Should compress pixels
         png = bytes.concat(png, createIEND());
 
         // Convert to Base64
@@ -125,7 +129,7 @@ contract PNGImage {
         if (width == 0 || height == 0) revert InvalidDimensions();
 
         Image memory image = Image({
-            ImageInfo: ImageInfo({
+            Info: ImageInfo({
             width: width,
             height: height,
             bitDepth: 4,  // 16 bits
